@@ -1,26 +1,27 @@
+// app/api/lookup/route.ts
 import { NextRequest, NextResponse } from 'next/server';
+import { upsertBooksShallow, addLibraryByBooks } from '@/lib/db';
 import { searchGoogleBooks, searchOpenLibrary } from '@/lib/books';
-import { upsertBooks } from '@/lib/db';
 
 export const runtime = 'nodejs';
 
 export async function GET(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const isbn = searchParams.get('isbn') || '';
-    const q = searchParams.get('q') || '';
-    const query = isbn ? `isbn:${isbn}` : q;
-    if (!query) return NextResponse.json({ error: 'isbn or q required' }, { status: 400 });
+  const { searchParams } = new URL(req.url);
+  const isbn = searchParams.get('isbn');
+  if (!isbn) return NextResponse.json({ error: 'isbn required' }, { status: 400 });
 
-    const [g, o] = await Promise.all([searchGoogleBooks(query), searchOpenLibrary(query)]);
+  try {
+    const [g, o] = await Promise.all([
+      searchGoogleBooks(`isbn:${isbn}`),
+      searchOpenLibrary(isbn),
+    ]);
     const matches = [...g, ...o];
-    if (matches.length) {
-      try { await upsertBooks(matches.slice(0, 3)); } catch (e: any) {
-        // upsert 失敗時も matches は返す
-        return NextResponse.json({ matches, saved: 0, upsertError: e?.message || String(e) }, { status: 200 });
-      }
-    }
-    return NextResponse.json({ matches, saved: Math.min(matches.length, 3) });
+    // 書誌保存
+    const savedRows = await upsertBooksShallow(matches);
+    // ★ Library にも登録（従来の「booksだけ保存」だと一覧に出ないため）
+    const savedCount = await addLibraryByBooks(savedRows.map((r: any) => r.id));
+
+    return NextResponse.json({ matches: savedRows, saved: savedCount });
   } catch (e: any) {
     return NextResponse.json({ error: 'lookup-failed', detail: e?.message || String(e) }, { status: 500 });
   }
