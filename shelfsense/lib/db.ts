@@ -1,129 +1,183 @@
 // lib/db.ts
+// サーバー専用（API ルートなど）でのみ import してください。
+// フロント（'use client'）からは絶対に import しないこと。
 import { createClient } from '@supabase/supabase-js';
 
-const url  = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const key  = process.env.SUPABASE_SERVICE_ROLE_KEY!; // server-only
-if (!url || !key) throw new Error('Supabase URL or SERVICE_ROLE key is missing. Check .env.local');
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-export const supabase = createClient(url, key, { auth: { persistSession: false } });
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn('[lib/db] Missing envs: NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+}
 
-type BookRow = {
-  id?: string;
+export const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+// ---------------------------------------------
+// 型
+// ---------------------------------------------
+export type ShallowBook = {
   title: string;
   authors?: string[];
   isbn13?: string | null;
   language?: string | null;
   published_year?: number | null;
-  description?: string | null;
-  cover_url?: string | null;
-  source?: 'google'|'openlibrary'|'manual'|null;
+  description?: string;
+  cover_url?: string;
+  source: 'google' | 'openlibrary' | 'manual';
   source_id?: string | null;
-  metadata?: any;
+  metadata?: Record<string, any>;
 };
 
-export async function upsertBooksShallow(rows: BookRow[]) {
-  if (!rows?.length) return [];
+// ---------------------------------------------
+// 書誌の薄い upsert（(source,source_id) でユニーク）
+// ---------------------------------------------
+export async function upsertBooksShallow(rows: ShallowBook[]) {
+  if (!rows?.length) return { data: [], error: null };
+
+  const payload = rows.map((r) => ({
+    title: r.title || '(no title)',
+    authors: r.authors || [],
+    isbn13: r.isbn13 || null,
+    language: r.language || null,
+    published_year: r.published_year ?? null,
+    description: r.description || '',
+    cover_url: r.cover_url || '',
+    source: (r.source || 'manual') as 'google' | 'openlibrary' | 'manual',
+    source_id: r.source_id || null,
+    metadata: r.metadata || {},
+  }));
+
   const { data, error } = await supabase
     .from('books')
-    .upsert(
-      rows.map(r => ({
-        title: r.title,
-        authors: r.authors || [],
-        isbn13: r.isbn13 || null,
-        language: r.language || null,
-        published_year: r.published_year ?? null,
-        description: r.description || '',
-        cover_url: r.cover_url || '',
-        source: r.source || 'manual',
-        source_id: r.source_id || null,
-        metadata: r.metadata || {}
-      })),
-      { onConflict: 'source,source_id' }
-    )
-    .select('id,title,authors,isbn13,language,published_year,description,cover_url,source,source_id');
-  if (error) throw error;
-  return data!;
+    .upsert(payload, { onConflict: 'source,source_id' })
+    .select('id, title, authors, isbn13, language, published_year, cover_url, source, source_id, metadata');
+
+  return { data, error };
 }
 
-/* ===== Library（独立） ===== */
+// 互換（古いコードが import している可能性があるため）
+export const upsertBooks = upsertBooksShallow;
 
-export async function listLibrary(limit = 500) {
-  const { data, error } = await supabase
-    .from('library_items')
-    .select('id, created_at, book:books(id,title,authors,isbn13,cover_url,description,language,published_year,source,source_id)')
-    .order('created_at', { ascending: false })
-    .limit(limit);
+// ---------------------------------------------
+// 与えられた items を upsert し、books.id を返す
+// ---------------------------------------------
+export async function ensureBookIds(items: ShallowBook[]): Promise<{ id: string; srcIndex: number }[]> {
+  const { data, error } = await upsertBooksShallow(items);
   if (error) throw error;
-  return data!;
+
+  const out: { id: string; srcIndex: number }[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const hit =
+      data?.find(
+        (d: any) =>
+          (it.source_id && d.source_id && String(d.source_id) === String(it.source_id) && d.source === it.source) ||
+          (!it.source_id && d.title === it.title)
+      ) || null;
+    if (hit?.id) out.push({ id: hit.id, srcIndex: i });
+  }
+  return out;
 }
 
-export async function getLibraryBookIds(): Promise<Set<string>> {
-  const { data, error } = await supabase.from('library_items').select('book_id');
+// ---------------------------------------------
+// Library / Recommended への保存・トグル
+// ---------------------------------------------
+export async function saveToLibrary(items: ShallowBook[]) {
+  const ids = await ensureBookIds(items);
+  if (!ids.length) return { saved: 0 };
+  const rows = ids.map(({ id }) => ({ book_id: id }));
+  const { error } = await supabase.from('library_items').upsert(rows, { onConflict: 'book_id' });
   if (error) throw error;
-  return new Set((data || []).map((d: any) => d.book_id));
+  return { saved: rows.length };
 }
 
-export async function addLibraryByBooks(bookIds: string[]) {
-  if (!bookIds?.length) return 0;
-  const rows = bookIds.map(id => ({ book_id: id }));
-  const { data, error } = await supabase.from('library_items').upsert(rows, { onConflict: 'book_id' }).select('id');
+export async function saveToRecommended(items: ShallowBook[], reasons?: (string | undefined)[]) {
+  const ids = await ensureBookIds(items);
+  if (!ids.length) return { saved: 0 };
+  const rows = ids.map(({ id }, i) => ({ book_id: id, reason: reasons?.[i] || null as any }));
+  const { error } = await supabase.from('recommended_items').upsert(rows, { onConflict: 'book_id' });
   if (error) throw error;
-  return data?.length || 0;
+  return { saved: rows.length };
+}
+
+// 既存の API が参照している互換エイリアス
+export async function addLibraryByBooks(items: ShallowBook[]) {
+  return saveToLibrary(items);
 }
 
 export async function toggleLibrary(bookId: string) {
-  const { data, error } = await supabase.from('library_items').select('id').eq('book_id', bookId).maybeSingle();
-  if (error) throw error;
-  if (data?.id) {
-    const del = await supabase.from('library_items').delete().eq('id', data.id);
-    if (del.error) throw del.error;
-    return { status: 'removed' as const };
+  // あるなら削除、なければ追加
+  const { data: exists, error: selErr } = await supabase
+    .from('library_items')
+    .select('id')
+    .eq('book_id', bookId)
+    .limit(1);
+  if (selErr) throw selErr;
+
+  if (exists && exists.length > 0) {
+    const { error } = await supabase.from('library_items').delete().eq('book_id', bookId);
+    if (error) throw error;
+    return { toggled: 'off' as const };
   } else {
-    const ins = await supabase.from('library_items').insert({ book_id: bookId }).select('id').single();
-    if (ins.error) throw ins.error;
-    return { status: 'added' as const };
+    const { error } = await supabase.from('library_items').insert({ book_id: bookId });
+    if (error) throw error;
+    return { toggled: 'on' as const };
   }
 }
 
-/* ===== Recommended（独立） ===== */
-
-export async function listRecommended(limit = 200) {
-  const { data, error } = await supabase
+export async function toggleRecommended(bookId: string, reason?: string) {
+  const { data: exists, error: selErr } = await supabase
     .from('recommended_items')
-    .select('id,reason,created_at,book:books(id,title,authors,isbn13,cover_url,description,language,published_year,source,source_id)')
-    .order('created_at', { ascending: false })
-    .limit(limit);
-  if (error) throw error;
-  return data!;
-}
+    .select('id')
+    .eq('book_id', bookId)
+    .limit(1);
+  if (selErr) throw selErr;
 
-export async function getRecommendedBookIds(): Promise<Set<string>> {
-  const { data, error } = await supabase.from('recommended_items').select('book_id');
-  if (error) throw error;
-  return new Set((data || []).map((d: any) => d.book_id));
-}
-
-export async function addRecommendedByBooks(bookIds: string[], reasons?: Record<string, string>) {
-  if (!bookIds.length) return 0;
-  const rows = bookIds.map(id => ({ book_id: id, reason: reasons?.[id] || null }));
-  const { data, error } = await supabase
-    .from('recommended_items')
-    .upsert(rows, { onConflict: 'book_id' })
-    .select('id');
-  if (error) throw error;
-  return data?.length || 0;
-}
-
-export async function toggleRecommended(bookId: string) {
-  const { data, error } = await supabase.from('recommended_items').select('id').eq('book_id', bookId).maybeSingle();
-  if (error) throw error;
-  if (data?.id) {
-    const del = await supabase.from('recommended_items').delete().eq('id', data.id);
-    if (del.error) throw del.error;
-    return { status: 'removed' as const };
+  if (exists && exists.length > 0) {
+    const { error } = await supabase.from('recommended_items').delete().eq('book_id', bookId);
+    if (error) throw error;
+    return { toggled: 'off' as const };
   } else {
-    const ins = await supabase.from('recommended_items').insert({ book_id: bookId }).select('id').single();
-    if (ins.error) throw ins.error;
-    return { status: 'added' as const };
+    const { error } = await supabase.from('recommended_items').insert({ book_id: bookId, reason: reason || null });
+    if (error) throw error;
+    return { toggled: 'on' as const };
   }
+}
+
+// ---------------------------------------------
+// 一覧（Recommended / Library）
+// ---------------------------------------------
+export async function listRecommended() {
+  const { data, error } = await supabase
+    .from('recommended_items')
+    .select(`
+      id,
+      reason,
+      created_at,
+      book:books (
+        id, title, authors, isbn13, language, published_year, description, cover_url, source, source_id, metadata
+      )
+    `)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return data || [];
+}
+
+export async function listLibrary() {
+  const { data, error } = await supabase
+    .from('library_items')
+    .select(`
+      id,
+      created_at,
+      book:books (
+        id, title, authors, isbn13, language, published_year, description, cover_url, source, source_id, metadata
+      )
+    `)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return data || [];
 }

@@ -59,8 +59,9 @@ export async function POST(req: NextRequest) {
     let img = sharp(buf).rotate().normalize();
     const meta = await img.metadata();
     if ((meta.width || 0) < 1200) img = img.resize({ width: 1600, withoutEnlargement: false });
-    buf = await img.jpeg({ quality: 85 }).toBuffer();
-    const base64 = `data:image/jpeg;base64,${buf.toString('base64')}`;
+    const processedU8 = new Uint8Array(await img.jpeg({ quality: 85 }).toBuffer());
+    const base64 = `data:image/jpeg;base64,${Buffer.from(processedU8).toString('base64')}`;
+    
 
     // 1) Vision 抽出（失敗したらテキスト型にフォールバック）
     async function runVision() {

@@ -1,11 +1,15 @@
 // app/api/library/[id]/route.ts
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/db';
 
 export const runtime = 'nodejs';
 
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string }}) {
-  const { data, error } = await supabase.from('library_items').delete().eq('id', params.id).select('id');
+export async function DELETE(_req: Request, context: any) {
+  const id = context?.params?.id as string | undefined;
+  if (!id) return NextResponse.json({ error: 'bad-request', detail: 'missing id' }, { status: 400 });
+
+  const { data, error } = await supabase.from('books').delete().eq('id', id).select('id');
   if (error) return NextResponse.json({ error: 'delete-failed', detail: error.message }, { status: 500 });
+
   return NextResponse.json({ deleted: data?.length || 0 });
 }
