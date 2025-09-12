@@ -18,7 +18,6 @@ const Rec = z.object({
     id: z.string().optional(),
     info_url: z.string().url().optional(),
   }).optional(),
-  // 追加でUIに渡す（保存にも使える）
   isbn13: z.string().optional(),
   cover_url: z.string().optional(),
   description: z.string().optional(),
@@ -36,18 +35,22 @@ const Result = z.object({
   recommendations: z.array(Rec),
 });
 
-async function enrichByTitle(title: string, lang = 'ja') {
-  const g = await searchGoogleBooks(`intitle:"${title}"`, { orderBy: 'relevance', langRestrict: lang });
-  if (g.length) return g[0];
-  const o = await searchOpenLibrary(title);
-  return o[0];
-}
-
 const nrm = (s: string) =>
   (s || '').toLowerCase()
     .replace(/[【】［］\[\]()（）,:：;・\-–—'’"“”!！?？]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+async function enrichByTitle(title: string, lang = 'ja') {
+  try {
+    const g = await searchGoogleBooks(`intitle:"${title}"`, { orderBy: 'relevance', langRestrict: lang, maxResults: 5 });
+    if (g.length) return g[0];
+    const o = await searchOpenLibrary(title, { maxResults: 5 });
+    return o[0];
+  } catch {
+    return undefined;
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -57,7 +60,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'titles required' }, { status: 400 });
     }
 
-    // 1) seeds 解決
+    // 1) 参考本を解決
     const seeds: any[] = [];
     const resolved: any[] = [];
     for (const t of titles) {
@@ -70,7 +73,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2) 候補プール（重複除去）
+    // 2) 候補プール（安全化）
     const queries = new Set<string>();
     for (const s of seeds) {
       if (s.title) {
@@ -83,20 +86,20 @@ export async function POST(req: NextRequest) {
     const pool: any[] = [];
     for (const q of Array.from(queries).slice(0, 6)) {
       const [g, o] = await Promise.all([
-        searchGoogleBooks(q, { orderBy: q.length < 5 ? 'newest' : 'relevance', langRestrict: language }),
-        searchOpenLibrary(q),
+        searchGoogleBooks(q, { orderBy: q.length < 5 ? 'newest' : 'relevance', langRestrict: language, maxResults: 8 }),
+        searchOpenLibrary(q, { maxResults: 8 }),
       ]);
       pool.push(...g, ...o);
     }
-    const seen = new Set<string>();
+    const seenPool = new Set<string>();
     const candidates = pool.filter((b) => {
       const key = `${b.source}:${b.source_id || b.isbn13 || b.title}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      if (seenPool.has(key)) return false;
+      seenPool.add(key);
       return true;
     }).slice(0, 60);
 
-    // 3) LLM（プロンプト改良：多参考本との関連を優先・単独強関連は減点）
+    // 3) LLM 生成（構造化 → 失敗時テキスト → JSON.parse も try/catch）
     const seedTitles = seeds.map((s: any) => s.title).filter(Boolean);
     const seedText = seeds.map(s => `- ${s.title}${s.authors?.length ? ` / ${s.authors.join(', ')}` : ''}${s.year ? ` (${s.year})` : ''}`).join('\n');
     const listText = candidates.map((b, i) =>
@@ -104,12 +107,10 @@ export async function POST(req: NextRequest) {
       `${b.description ? `   ${b.description.slice(0, 180)}…\n` : ''}`
     ).join('\n');
 
-    const ATTENTION = [
-      '注意：参考本（読み取った本・タイトル入力の本）と同一の書籍（タイトル一致・ISBN一致）は推薦リストに含めない。',
-      '優先度：なるべく「複数」の参考本と関連性がある候補を上位に。1冊とだけ強く関連して他とは弱いものは順位を下げる（完全排除はしない）。',
-      '各推薦は3〜5文で具体的な理由（対象読者、前提知識、得られるスキル/アウトカム、関連章や近刊年号）を日本語で。reason は80〜200文字程度。',
-      '各推薦には relatedTo:Array<string> を必ず含め、関連の強い参考本タイトルを複数挙げる（可能な範囲）。'
-    ].join(' ');
+    const ATTENTION =
+      '注意：参考本と同一の書籍（タイトル一致・ISBN一致）は推薦に含めない。' +
+      '優先：複数の参考本と関連する候補を上位に。単一参考本のみ強く関連する候補は順位を下げ、多様性を確保。' +
+      '各推薦は3〜5文、reasonは80〜200文字。relatedTo は参考本のタイトルを複数含める。';
 
     async function runStructured() {
       const { object } = await generateObject({
@@ -118,17 +119,16 @@ export async function POST(req: NextRequest) {
         messages: [{
           role: 'user',
           content: [
-            { type: 'text', text:
-              `あなたは読書コンシェルジュです。次の参考本を好みの手がかりに、候補から ${n} 冊推薦してください。難易度:${hardness} 言語:${language}。 ${ATTENTION}` },
+            { type: 'text', text: `以下の参考本を手がかりに候補から${n}冊推薦。難易度:${hardness} 言語:${language}。 ${ATTENTION}` },
             { type: 'text', text: `【参考本】\n${seedText || '(empty)'}` },
-            { type: 'text', text: `【候補】\n${listText}` },
+            { type: 'text', text: `【候補】\n${listText || '(empty)'}` },
           ]
         }],
       });
       return object;
     }
 
-    let object: any;
+    let object: any = null;
     try {
       object = await runStructured();
     } catch {
@@ -137,37 +137,35 @@ export async function POST(req: NextRequest) {
         messages: [{
           role: 'user',
           content: [
-            { type: 'text', text:
-              `JSONのみで出力。キー: recommendations(Array<{title,authors?,reason,confidence?,relatedTo?:string[]}> )。 ${ATTENTION}` },
+            { type: 'text', text: `JSONのみ（コードブロック禁止）。{ "recommendations": Array<{ "title": string, "authors"?: string[], "reason": string, "confidence"?: number, "relatedTo"?: string[] }> } で出力。 ${ATTENTION}` },
             { type: 'text', text: `【参考本】\n${seedText || '(empty)'}` },
-            { type: 'text', text: `【候補】\n${listText}` },
+            { type: 'text', text: `【候補】\n${listText || '(empty)'}` },
           ]
         }]
       });
       try { object = JSON.parse(text); } catch { object = { recommendations: [] }; }
     }
 
-    // 4) source付与 & 同一排除
     const seedTitleSet = new Set(seeds.map((s:any)=>nrm(s.title||'')));
     const seedIsbnSet  = new Set(resolved.map((s:any)=>s.isbn13).filter(Boolean));
 
+    // 4) source付与 & 同一排除
     let out = (object?.recommendations || []).map((r: any) => {
       const hit = candidates.find(c =>
         nrm(c.title) === nrm(r.title) ||
         (r.authors?.[0] && (c.authors || [])[0]?.toLowerCase() === r.authors[0].toLowerCase())
       );
       if (hit) {
-        // ここで表紙などを持ち回す（No image 対策）
         r.isbn13 = hit.isbn13 || r.isbn13;
         r.cover_url = hit.cover_url || r.cover_url;
         r.description = hit.description || r.description;
         r.language = hit.language || r.language;
         r.published_year = hit.published_year || r.published_year;
-
         r.source = {
           api: hit.source,
           id: hit.source_id || hit.isbn13 || '',
-          info_url: hit.metadata?.infoLink
+          info_url:
+            hit.metadata?.infoLink
             || (hit.source === 'google' && hit.source_id ? `https://books.google.com/books?id=${encodeURIComponent(hit.source_id)}` : undefined)
             || (hit.metadata?.info_url || undefined),
         };
@@ -183,22 +181,40 @@ export async function POST(req: NextRequest) {
       return true;
     });
 
-    // 5) 多参考本を優先する再ランク（relatedTo を活用）
+    // 5) 多参考本優先スコア + 偏り抑制
     const seedSet = new Set(seedTitles.map(nrm));
     out = out.map((r: any) => {
-      const relatedCount = (r.relatedTo || [])
-        .map((t: string) => nrm(t))
-        .filter((t: string) => seedSet.has(t)).length;
+      const related = (r.relatedTo || []).map((t: string) => nrm(t)).filter((t: string) => seedSet.has(t));
+      const relatedCount = related.length;
       const base = typeof r.confidence === 'number' ? r.confidence : 0.5;
-      const penalty = relatedCount === 1 ? 0.15 : 0; // 1冊だけ強い関連は少し下げる
+      const penalty = relatedCount === 1 ? 0.15 : 0;
       const score = base + 0.22 * relatedCount - penalty;
-      return { ...r, __score: score };
+      return { ...r, __score: score, __related: related };
     }).sort((a: any, b: any) => (b.__score - a.__score));
+
+    const cap = Math.ceil(n / 2);
+    const perSeed: Record<string, number> = {};
+    const picked: any[] = [];
+    const rest: any[] = [];
+
+    for (const r of out) {
+      const main = r.__related?.[0] || '';
+      if (main) {
+        perSeed[main] = perSeed[main] || 0;
+        if (perSeed[main] < cap) { perSeed[main]++; picked.push(r); }
+        else { rest.push(r); }
+      } else { rest.push(r); }
+      if (picked.length >= n) break;
+    }
+    for (const r of rest) {
+      if (picked.length >= n) break;
+      picked.push(r);
+    }
 
     return NextResponse.json({
       resolved,
       extractedSeeds: object?.extractedSeeds || [],
-      recommendations: out.slice(0, n).map(({ __score, ...rest }: any) => rest),
+      recommendations: picked.slice(0, n).map(({ __score, __related, ...rest }: any) => rest),
     });
   } catch (e: any) {
     return NextResponse.json({ error: 'recommend-llm-failed', detail: e?.message || String(e) }, { status: 500 });

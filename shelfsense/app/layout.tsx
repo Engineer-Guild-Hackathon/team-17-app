@@ -2,19 +2,25 @@
 import './globals.css';
 import Link from 'next/link';
 
+export const metadata = {
+  title: 'ShelfSense',
+  description: 'Photo → Books → Recommendations',
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ja">
       <body className="min-h-screen bg-gray-50 text-gray-900">
         <header className="border-b bg-white">
-          <nav className="mx-auto max-w-5xl px-4 py-3 flex gap-4 items-center">
-            <Link href="/" className="font-semibold">ShelfSense</Link>
-            <Link href="/" className="text-sm text-gray-600 hover:text-black">Home</Link>
-            <Link href="/recommend" className="text-sm text-gray-600 hover:text-black">Recommend</Link>
-            <Link href="/library" className="text-sm text-gray-600 hover:text-black">Library</Link>
+          <nav className="max-w-5xl mx-auto px-4 py-3 flex items-center gap-4 text-sm">
+            <span className="font-semibold">📚 ShelfSense</span>
+            <Link className="hover:underline" href="/">Home</Link>
+            <Link className="hover:underline" href="/recommend">Recommend</Link>
+            <Link className="hover:underline" href="/library">Library</Link>
+            <Link className="hover:underline" href="/recommended-library">Recommended Library</Link>
           </nav>
         </header>
-        <main className="mx-auto max-w-5xl px-4 py-6">{children}</main>
+        <main className="max-w-5xl mx-auto px-4 py-6">{children}</main>
       </body>
     </html>
   );

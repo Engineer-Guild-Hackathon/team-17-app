@@ -1,6 +1,7 @@
 // app/library/page.tsx
 import Link from 'next/link';
 import { supabase } from '@/lib/db';
+import ClientList from './ClientList';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -38,7 +39,7 @@ function infoLinkFromBook(b: any): string | null {
 export default async function LibraryPage() {
   const { data, error } = await supabase
     .from('library_items')
-    .select('id, created_at, books(*)')
+    .select('id, created_at, is_favorite, books(*)')
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -51,11 +52,19 @@ export default async function LibraryPage() {
     );
   }
 
-  // Supabaseの結合で同じ book が複数返るケースへの最終防衛線
-  const rowsRaw = (data || []).map((r: any) => ({ id: r.id, created_at: r.created_at, book: r.books }));
+  const rowsRaw = (data || []).map((r: any) => ({
+    id: r.id,
+    created_at: r.created_at,
+    is_favorite: !!r.is_favorite,
+    book: r.books,
+    cover: coverUrlFromBook(r.books),
+    href: infoLinkFromBook(r.books),
+  }));
+
+  // 念のため重複 book.id を排除
   const seen = new Set<string>();
   const rows = rowsRaw.filter((r) => {
-    const bid = r.book?.id;
+    const bid = r.book?.id as string | undefined;
     if (!bid) return true;
     if (seen.has(bid)) return false;
     seen.add(bid);
@@ -73,48 +82,11 @@ export default async function LibraryPage() {
           <Link href="/recommend" className="text-sm text-blue-600 hover:underline">
             おすすめ生成へ
           </Link>
-          <Link href="/" className="text-sm text-blue-600 hover:underline">
-            ← ホームへ
-          </Link>
+          <Link href="/" className="text-sm text-blue-600 hover:underline">← ホームへ</Link>
         </div>
       </div>
 
-      {!rows.length ? (
-        <p className="text-sm text-gray-500">まだ本がありません。バーコード追加やおすすめ生成から保存してみてください。</p>
-      ) : (
-        <ul className="space-y-3">
-          {rows.map((r) => {
-            const b = r.book;
-            const img = coverUrlFromBook(b);
-            const href = infoLinkFromBook(b) || '#';
-            return (
-              <li key={r.id} className="p-3 border rounded-xl bg-white flex gap-3 items-start">
-                {img ? (
-                  <img src={img} alt={b.title} className="w-16 h-24 object-cover rounded" />
-                ) : (
-                  <div className="w-16 h-24 bg-gray-200 rounded flex items-center justify-center text-xs">
-                    No image
-                  </div>
-                )}
-                <div className="flex-1 min-w-0">
-                  <div className="font-semibold break-words">
-                    <a href={href} target="_blank" rel="noreferrer" className="hover:underline">
-                      {b.title}
-                    </a>
-                  </div>
-                  <div className="text-sm text-gray-600">
-                    {(b.authors || []).join(', ')}
-                  </div>
-                  <div className="text-xs text-gray-500">{b.isbn13 || ''}</div>
-                  {b.description ? (
-                    <p className="text-xs text-gray-700 mt-1 line-clamp-3">{b.description}</p>
-                  ) : null}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      <ClientList initialRows={rows} />
     </div>
   );
 }
