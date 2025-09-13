@@ -13,5 +13,5 @@
 ---
 
 ## デモ　/ プレゼン資料
-- デモURL: https://www.canva.com/design/DAGywk18uUM/8LnuOE5uDMx3U9zw3O4tnA/edit?utm_content=DAGywk18uUM&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
-- プレゼンURL：
+- デモURL: プレゼン上のビデオもしくはこのリポジトリの動画
+- プレゼンURL：https://www.canva.com/design/DAGywk18uUM/8LnuOE5uDMx3U9zw3O4tnA/edit?utm_content=DAGywk18uUM&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
